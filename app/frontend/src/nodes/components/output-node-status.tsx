@@ -17,7 +17,6 @@ export function OutputNodeStatus({
   isProcessing,
   isAnyAgentRunning,
   isOutputAvailable,
-  isConnected,
   onViewOutput,
   processingText = "In Progress",
   completingText = "Completing",
@@ -63,4 +62,4 @@ export function OutputNodeStatus({
       )}
     </div>
   );
-} 
+}

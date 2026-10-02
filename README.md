@@ -108,6 +108,8 @@ poetry run python src/main.py --ticker AAPL,MSFT,NVDA
 
 You can also specify a `--ollama` flag to run the AI hedge fund using local LLMs.
 
+Financial data requests use a 5-second connect timeout and a 30-second read timeout. Timeouts and connection failures retry up to three times with 1, 2, and 4-second waits; HTTP 429 responses keep their existing longer backoff. News and insider-trade pagination uses day-level cursors, so a full page that cannot move the cursor returns its unique rows as partial data and is not cached. Run the focused reliability and cache checks with `poetry run pytest tests/test_api_reliability.py tests/test_api_rate_limiting.py tests/test_cache.py`.
+
 ```bash
 poetry run python src/main.py --ticker AAPL,MSFT,NVDA --ollama
 ```

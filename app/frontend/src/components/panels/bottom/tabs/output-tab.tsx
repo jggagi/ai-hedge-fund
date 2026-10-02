@@ -13,20 +13,16 @@ interface OutputTabProps {
 export function OutputTab({ className }: OutputTabProps) {
   const { currentFlowId } = useFlowContext();
   const { getAgentNodeDataForFlow, getOutputNodeDataForFlow } = useNodeContext();
-  const [updateTrigger, setUpdateTrigger] = useState(0);
-  
+  const [, setUpdateTrigger] = useState(0);
+
+  // Refresh the view periodically while agent data is updated outside React state.
+  useEffect(() => {
+    const interval = setInterval(() => setUpdateTrigger((prev) => prev + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
   // Get current flow data
   const agentData = getAgentNodeDataForFlow(currentFlowId?.toString() || null);
   const outputData = getOutputNodeDataForFlow(currentFlowId?.toString() || null);
-  
-  // Force re-render periodically to show real-time updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setUpdateTrigger(prev => prev + 1);
-    }, 1000);
-    
-    return () => clearInterval(interval);
-  }, []);
   
   // Detect if this is a backtest run
   const isBacktestRun = agentData && agentData['backtest'];
@@ -54,4 +50,4 @@ export function OutputTab({ className }: OutputTabProps) {
       )}
     </div>
   );
-} 
+}

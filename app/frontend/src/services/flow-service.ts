@@ -1,6 +1,5 @@
 import { Flow } from '@/types/flow';
-
-const API_BASE_URL = 'http://localhost:8000';
+import { API_BASE_URL } from '@/lib/api-config';
 
 export interface CreateFlowRequest {
   name: string;
@@ -105,4 +104,4 @@ export const flowService = {
       viewport,
     });
   },
-}; 
+};

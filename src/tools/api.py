@@ -26,7 +26,14 @@ from src.data.models import (
 _cache = get_cache()
 
 
-def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3) -> requests.Response:
+def _make_api_request(
+    url: str,
+    headers: dict,
+    method: str = "GET",
+    json_data: dict = None,
+    max_retries: int = 3,
+    timeout: tuple[float, float] = (5, 30),
+) -> requests.Response:
     """
     Make an API request with rate limiting handling and moderate backoff.
     
@@ -36,6 +43,7 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
         method: HTTP method (GET or POST)
         json_data: JSON data for POST requests
         max_retries: Maximum number of retries (default: 3)
+        timeout: Connect and read timeout in seconds (default: 5 and 30 seconds)
     
     Returns:
         requests.Response: The response object
@@ -43,11 +51,29 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
     Raises:
         Exception: If the request fails with a non-429 error
     """
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+        raise ValueError("max_retries must be a non-negative integer")
+
     for attempt in range(max_retries + 1):  # +1 for initial attempt
-        if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
-        else:
-            response = requests.get(url, headers=headers)
+        try:
+            if method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=json_data, timeout=timeout)
+            else:
+                response = requests.get(url, headers=headers, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt >= max_retries:
+                raise
+
+            delay = 2**attempt
+            logger.warning(
+                "Transient request failure (%s). Attempt %s/%s; retrying in %ss.",
+                type(exc).__name__,
+                attempt + 1,
+                max_retries + 1,
+                delay,
+            )
+            time.sleep(delay)
+            continue
         
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
@@ -202,6 +228,8 @@ def get_insider_trades(
         headers["X-API-KEY"] = financial_api_key
 
     all_trades = []
+    seen_trades = set()
+    pagination_complete = True
     current_end_date = end_date
 
     while True:
@@ -212,6 +240,12 @@ def get_insider_trades(
 
         response = _make_api_request(url, headers)
         if response.status_code != 200:
+            if all_trades and start_date:
+                logger.warning(
+                    "Insider trades pagination stopped for %s after a non-200 response; returning partial results without caching.",
+                    ticker,
+                )
+                pagination_complete = False
             break
 
         try:
@@ -220,29 +254,50 @@ def get_insider_trades(
             insider_trades = response_model.insider_trades
         except Exception as e:
             logger.warning("Failed to parse insider trades response for %s: %s", ticker, e)
+            if all_trades and start_date:
+                logger.warning("Returning partial insider trades for %s without caching.", ticker)
+                pagination_complete = False
             break
 
         if not insider_trades:
             break
 
-        all_trades.extend(insider_trades)
+        for trade in insider_trades:
+            identity = tuple(trade.model_dump().items())
+            if identity not in seen_trades:
+                seen_trades.add(identity)
+                all_trades.append(trade)
 
         # Only continue pagination if we have a start_date and got a full page
         if not start_date or len(insider_trades) < limit:
             break
 
         # Update end_date to the oldest filing date from current batch for next iteration
-        current_end_date = min(trade.filing_date for trade in insider_trades).split("T")[0]
+        next_end_date = min(trade.filing_date for trade in insider_trades).split("T")[0]
 
         # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
+        if next_end_date <= start_date:
             break
+
+        # The API cursor has day precision. An inclusive full page whose oldest
+        # record is still on the current day cannot advance and would repeat.
+        if next_end_date >= current_end_date:
+            logger.warning(
+                "Insider trades pagination stopped for %s at %s; cursor did not advance. Returning partial results without caching.",
+                ticker,
+                current_end_date,
+            )
+            pagination_complete = False
+            break
+
+        current_end_date = next_end_date
 
     if not all_trades:
         return []
 
     # Cache the results using the comprehensive cache key
-    _cache.set_insider_trades(cache_key, [trade.model_dump() for trade in all_trades])
+    if pagination_complete:
+        _cache.set_insider_trades(cache_key, [trade.model_dump() for trade in all_trades])
     return all_trades
 
 
@@ -268,6 +323,8 @@ def get_company_news(
         headers["X-API-KEY"] = financial_api_key
 
     all_news = []
+    seen_news_urls = set()
+    pagination_complete = True
     current_end_date = end_date
 
     while True:
@@ -278,6 +335,12 @@ def get_company_news(
 
         response = _make_api_request(url, headers)
         if response.status_code != 200:
+            if all_news and start_date:
+                logger.warning(
+                    "Company news pagination stopped for %s after a non-200 response; returning partial results without caching.",
+                    ticker,
+                )
+                pagination_complete = False
             break
 
         try:
@@ -286,29 +349,49 @@ def get_company_news(
             company_news = response_model.news
         except Exception as e:
             logger.warning("Failed to parse company news response for %s: %s", ticker, e)
+            if all_news and start_date:
+                logger.warning("Returning partial company news for %s without caching.", ticker)
+                pagination_complete = False
             break
 
         if not company_news:
             break
 
-        all_news.extend(company_news)
+        for news in company_news:
+            if news.url not in seen_news_urls:
+                seen_news_urls.add(news.url)
+                all_news.append(news)
 
         # Only continue pagination if we have a start_date and got a full page
         if not start_date or len(company_news) < limit:
             break
 
         # Update end_date to the oldest date from current batch for next iteration
-        current_end_date = min(news.date for news in company_news).split("T")[0]
+        next_end_date = min(news.date for news in company_news).split("T")[0]
 
         # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
+        if next_end_date <= start_date:
             break
+
+        # News cursors are inclusive and day-granular. If the oldest result is
+        # still on the current cursor day, another request cannot make progress.
+        if next_end_date >= current_end_date:
+            logger.warning(
+                "Company news pagination stopped for %s at %s; cursor did not advance. Returning partial results without caching.",
+                ticker,
+                current_end_date,
+            )
+            pagination_complete = False
+            break
+
+        current_end_date = next_end_date
 
     if not all_news:
         return []
 
     # Cache the results using the comprehensive cache key
-    _cache.set_company_news(cache_key, [news.model_dump() for news in all_news])
+    if pagination_complete:
+        _cache.set_company_news(cache_key, [news.model_dump() for news in all_news])
     return all_news
 
 
