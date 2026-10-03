@@ -25,6 +25,8 @@ npm run dev
 
 While the application is running, changes made to the code will be automatically reflected in the browser!
 
+The frontend uses `http://localhost:8000` as its backend API by default. To use another backend, set `VITE_API_URL` in an `app/frontend/.env.local` file, for example `VITE_API_URL=https://api.example.com`. A trailing slash is optional. Validate frontend changes with `npm run build`.
+
 ## Disclaimer
 
 This project is for **educational and research purposes only**.

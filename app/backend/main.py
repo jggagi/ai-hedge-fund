@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import asyncio
+import os
 
 from app.backend.routes import api_router
 from app.backend.database.connection import engine
@@ -14,13 +15,21 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge Fund", version="0.1.0")
 
+DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+extra_cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("HEDGE_FUND_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+cors_origins = list(dict.fromkeys([*DEFAULT_CORS_ORIGINS, *extra_cors_origins]))
+
 # Initialize database tables (this is safe to run multiple times)
 Base.metadata.create_all(bind=engine)
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Frontend URLs
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

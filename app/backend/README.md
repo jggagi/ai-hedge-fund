@@ -62,6 +62,16 @@ poetry run uvicorn main:app --reload
 
 This will start the FastAPI server with hot-reloading enabled.
 
+The backend stores SQLite data in `app/backend/hedge_fund.db` by default. To use a separate database, set `HEDGE_FUND_DATABASE_PATH` to an absolute or `~`-relative file path; the backend resolves it and creates its parent directory. Startup creates any missing tables in the selected database. Set `HEDGE_FUND_CORS_ORIGINS` to a comma-separated list of exact frontend origins to add to the existing localhost defaults, for example `http://127.0.0.1:5183,http://localhost:5183`.
+
+For a local run without the development reload process, run this from the repository root with an isolated SQLite database:
+
+```bash
+HEDGE_FUND_DATABASE_PATH=/tmp/ai-hedge-fund-smoke/hedge_fund.db \
+HEDGE_FUND_CORS_ORIGINS=http://127.0.0.1:5183,http://localhost:5183 \
+poetry run uvicorn app.backend.main:app --host 127.0.0.1 --port 8000
+```
+
 The API will be available at:
 - API Endpoint: http://localhost:8000
 - API Documentation: http://localhost:8000/docs

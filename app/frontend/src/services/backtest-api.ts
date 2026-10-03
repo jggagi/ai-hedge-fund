@@ -1,13 +1,12 @@
 import { NodeStatus, useNodeContext } from '@/contexts/node-context';
 import { extractBaseAgentKey } from '@/data/node-mappings';
 import { flowConnectionManager } from '@/hooks/use-flow-connection';
+import { API_BASE_URL } from '@/lib/api-config';
 import {
   BacktestDayResult,
   BacktestPerformanceMetrics,
   BacktestRequest
 } from '@/services/types';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export const backtestApi = {
   /**
