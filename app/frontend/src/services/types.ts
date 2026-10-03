@@ -46,6 +46,9 @@ export interface BaseHedgeFundRequest {
 }
 
 export interface HedgeFundRequest extends BaseHedgeFundRequest {
+  data_source?: 'financial_datasets' | 'sec_filings';
+  flow_id?: number;
+  timeout_seconds?: number;
   end_date?: string;
   start_date?: string;
   initial_cash?: number;
@@ -80,4 +83,4 @@ export interface BacktestPerformanceMetrics {
   long_short_ratio?: number;
   gross_exposure?: number;
   net_exposure?: number;
-} 
+}

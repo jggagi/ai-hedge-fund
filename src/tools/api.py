@@ -4,10 +4,12 @@ import os
 import pandas as pd
 import requests
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from src.data.cache import get_cache
+from src.run_context import RunStopped, get_active_run_context
 from src.data.models import (
     CompanyNews,
     CompanyNewsResponse,
@@ -24,6 +26,20 @@ from src.data.models import (
 
 # Global cache instance
 _cache = get_cache()
+
+
+def _capture_tool_result(endpoint: str, params: dict, body: Any, *, cache_hit: bool = False) -> None:
+    context = get_active_run_context()
+    if context is None:
+        return
+    from urllib.parse import urlencode
+    context.capture_source(
+        "TOOL_RESULT",
+        f"https://api.financialdatasets.ai/{endpoint}?{urlencode(params)}",
+        status_code=200,
+        body=body,
+        cache_hit=cache_hit,
+    )
 
 
 def _make_api_request(
@@ -54,14 +70,23 @@ def _make_api_request(
     if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
         raise ValueError("max_retries must be a non-negative integer")
 
+    context = get_active_run_context()
     for attempt in range(max_retries + 1):  # +1 for initial attempt
         try:
-            if method.upper() == "POST":
-                response = requests.post(url, headers=headers, json=json_data, timeout=timeout)
+            if context is not None:
+                context.check_active()
+                remaining = context.remaining_seconds()
+                request_timeout = (min(timeout[0], remaining), min(timeout[1], remaining))
             else:
-                response = requests.get(url, headers=headers, timeout=timeout)
+                request_timeout = timeout
+            if method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=json_data, timeout=request_timeout)
+            else:
+                response = requests.get(url, headers=headers, timeout=request_timeout)
         except (requests.Timeout, requests.ConnectionError) as exc:
             if attempt >= max_retries:
+                if context is not None:
+                    context.capture_source(method, url, error=type(exc).__name__)
                 raise
 
             delay = 2**attempt
@@ -72,14 +97,33 @@ def _make_api_request(
                 max_retries + 1,
                 delay,
             )
-            time.sleep(delay)
+            if context is not None:
+                context.interruptible_sleep(delay)
+            else:
+                time.sleep(delay)
             continue
+
+        if context is not None:
+            try:
+                response_body = response.json()
+            except Exception:
+                response_body = None
+            context.capture_source(
+                method,
+                url,
+                status_code=response.status_code,
+                body=response_body,
+                request_data=json_data if method.upper() == "POST" else None,
+            )
         
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
             delay = 60 + (30 * attempt)
             print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
-            time.sleep(delay)
+            if context is not None:
+                context.interruptible_sleep(delay)
+            else:
+                time.sleep(delay)
             continue
         
         # Return the response (whether success, other errors, or final 429)
@@ -93,7 +137,9 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     
     # Check cache first - simple exact match
     if cached_data := _cache.get_prices(cache_key):
-        return [Price(**price) for price in cached_data]
+        typed_data = [Price(**price) for price in cached_data]
+        _capture_tool_result("prices/", {"ticker": ticker, "start_date": start_date, "end_date": end_date}, [item.model_dump(mode="json") for item in typed_data], cache_hit=True)
+        return typed_data
 
     # If not in cache, fetch from API
     headers = {}
@@ -114,6 +160,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         logger.warning("Failed to parse price response for %s: %s", ticker, e)
         return []
 
+    _capture_tool_result("prices/", {"ticker": ticker, "start_date": start_date, "end_date": end_date}, [item.model_dump(mode="json") for item in prices])
     if not prices:
         return []
 
@@ -135,7 +182,9 @@ def get_financial_metrics(
     
     # Check cache first - simple exact match
     if cached_data := _cache.get_financial_metrics(cache_key):
-        return [FinancialMetrics(**metric) for metric in cached_data]
+        typed_data = [FinancialMetrics(**metric) for metric in cached_data]
+        _capture_tool_result("financial-metrics/", {"ticker": ticker, "report_period_lte": end_date, "period": period, "limit": limit}, [item.model_dump(mode="json") for item in typed_data], cache_hit=True)
+        return typed_data
 
     # If not in cache, fetch from API
     headers = {}
@@ -156,6 +205,7 @@ def get_financial_metrics(
         logger.warning("Failed to parse financial metrics response for %s: %s", ticker, e)
         return []
 
+    _capture_tool_result("financial-metrics/", {"ticker": ticker, "report_period_lte": end_date, "period": period, "limit": limit}, [item.model_dump(mode="json") for item in financial_metrics])
     if not financial_metrics:
         return []
 
@@ -199,6 +249,7 @@ def search_line_items(
     except Exception as e:
         logger.warning("Failed to parse line items response for %s: %s", ticker, e)
         return []
+    _capture_tool_result("financials/search/line-items", body, [item.model_dump(mode="json") for item in response_model.search_results[:limit]])
     if not search_results:
         return []
 
@@ -219,7 +270,9 @@ def get_insider_trades(
     
     # Check cache first - simple exact match
     if cached_data := _cache.get_insider_trades(cache_key):
-        return [InsiderTrade(**trade) for trade in cached_data]
+        typed_data = [InsiderTrade(**trade) for trade in cached_data]
+        _capture_tool_result("insider-trades/", {"ticker": ticker, "filing_date_lte": end_date, "filing_date_gte": start_date or "", "limit": limit}, [item.model_dump(mode="json") for item in typed_data], cache_hit=True)
+        return typed_data
 
     # If not in cache, fetch from API
     headers = {}
@@ -293,11 +346,13 @@ def get_insider_trades(
         current_end_date = next_end_date
 
     if not all_trades:
+        _capture_tool_result("insider-trades/", {"ticker": ticker, "filing_date_lte": end_date, "filing_date_gte": start_date or "", "limit": limit}, [])
         return []
 
     # Cache the results using the comprehensive cache key
     if pagination_complete:
         _cache.set_insider_trades(cache_key, [trade.model_dump() for trade in all_trades])
+    _capture_tool_result("insider-trades/", {"ticker": ticker, "filing_date_lte": end_date, "filing_date_gte": start_date or "", "limit": limit}, [item.model_dump(mode="json") for item in all_trades])
     return all_trades
 
 
@@ -314,7 +369,9 @@ def get_company_news(
     
     # Check cache first - simple exact match
     if cached_data := _cache.get_company_news(cache_key):
-        return [CompanyNews(**news) for news in cached_data]
+        typed_data = [CompanyNews(**news) for news in cached_data]
+        _capture_tool_result("news/", {"ticker": ticker, "start_date": start_date or "", "end_date": end_date, "limit": limit}, [item.model_dump(mode="json") for item in typed_data], cache_hit=True)
+        return typed_data
 
     # If not in cache, fetch from API
     headers = {}
@@ -387,11 +444,13 @@ def get_company_news(
         current_end_date = next_end_date
 
     if not all_news:
+        _capture_tool_result("news/", {"ticker": ticker, "start_date": start_date or "", "end_date": end_date, "limit": limit}, [])
         return []
 
     # Cache the results using the comprehensive cache key
     if pagination_complete:
         _cache.set_company_news(cache_key, [news.model_dump() for news in all_news])
+    _capture_tool_result("news/", {"ticker": ticker, "start_date": start_date or "", "end_date": end_date, "limit": limit}, [item.model_dump(mode="json") for item in all_news])
     return all_news
 
 
@@ -417,7 +476,9 @@ def get_market_cap(
 
         data = response.json()
         response_model = CompanyFactsResponse(**data)
-        return response_model.company_facts.market_cap
+        market_cap = response_model.company_facts.market_cap
+        _capture_tool_result("company/facts/", {"ticker": ticker}, {"market_cap": market_cap})
+        return market_cap
 
     financial_metrics = get_financial_metrics(ticker, end_date, api_key=api_key)
     if not financial_metrics:

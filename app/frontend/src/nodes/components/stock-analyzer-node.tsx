@@ -52,6 +52,7 @@ export function StockAnalyzerNode({
   const [startDate, setStartDate] = useNodeState(id, 'startDate', threeMonthsAgo.toISOString().split('T')[0]);
   const [endDate, setEndDate] = useNodeState(id, 'endDate', today.toISOString().split('T')[0]);
   const [open, setOpen] = useState(false);
+  const [runError, setRunError] = useState('');
   
   const { currentFlowId } = useFlowContext();
   const nodeContext = useNodeContext();
@@ -130,11 +131,9 @@ export function StockAnalyzerNode({
   };
 
   const handlePlay = () => {
-    // Expand bottom panel and set to output tab if backtest
-    if (runMode === 'backtest') {
-      expandBottomPanel();
-      setBottomPanelTab('output');
-    }
+    setRunError('');
+    expandBottomPanel();
+    setBottomPanelTab('output');
     
     // Get the current flow's nodes and edges
     const allNodes = getNodes();
@@ -186,6 +185,14 @@ export function StockAnalyzerNode({
         });
       }
     }
+    if (runMode === 'single') {
+      const analysts = agentNodes.filter(node => node.type === 'agent-node' || node.type === 'portfolio-manager-node');
+      if (!analysts.length || analysts.some(node => !allAgentModels[node.id])) {
+        setRunError('Select a model for every analyst and portfolio manager before running.');
+        return;
+      }
+      if (!startDate || !endDate || startDate > endDate) { setRunError('Choose a valid date range.'); return; }
+    }
     
     // Convert tickers to array    
     const tickerList = tickers.split(',').map(t => t.trim());
@@ -224,9 +231,9 @@ export function StockAnalyzerNode({
         })),
         graph_edges: validEdges,
         agent_models: agentModels,
-        // No global model - each agent uses its own model or system default
-        model_name: undefined,
-        model_provider: undefined,
+        model_name: agentModels[0]?.model_name,
+        model_provider: agentModels[0]?.model_provider,
+        timeout_seconds: 300,
         start_date: startDate,
         end_date: endDate,
       });
@@ -250,6 +257,7 @@ export function StockAnalyzerNode({
         <CardContent className="p-0">
           <div className="border-t border-border p-3">
             <div className="flex flex-col gap-4">
+              {runError && <p role="alert" className="text-xs text-destructive">{runError}</p>}
               <div className="flex flex-col gap-2">
                 <div className="text-subtitle text-primary flex items-center gap-1">
                   <Tooltip delayDuration={200}>

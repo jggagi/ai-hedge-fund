@@ -2,10 +2,11 @@ import { useNodeContext } from '@/contexts/node-context';
 import { api } from '@/services/api';
 import { backtestApi } from '@/services/backtest-api';
 import { BacktestRequest, HedgeFundRequest } from '@/services/types';
+import { isRunActive, ResearchRun, researchRuns } from '@/services/research-runs';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // Connection state for a specific flow
-export type FlowConnectionState = 'idle' | 'connecting' | 'connected' | 'error' | 'completed';
+export type FlowConnectionState = 'idle' | 'connecting' | 'connected' | 'error' | 'completed' | 'cancelling' | 'cancelled' | 'timed_out';
 
 interface FlowConnectionInfo {
   state: FlowConnectionState;
@@ -13,6 +14,10 @@ interface FlowConnectionInfo {
   startTime: number;
   lastActivity: number;
   error?: string;
+  runId?: number | null;
+  run?: ResearchRun | null;
+  kind?: 'single' | 'backtest';
+  stopRequested?: boolean;
 }
 
 // Global connection manager - tracks all active flow connections
@@ -81,6 +86,48 @@ export function useFlowConnection(flowId: string | null) {
   const nodeContext = useNodeContext();
   const [, forceUpdate] = useState({});
   const listenerRef = useRef<() => void>();
+  const contextRef = useRef(nodeContext);
+  contextRef.current = nodeContext;
+
+  // A stream is only a view of the durable run. Reloads retrieve it without rerunning.
+  useEffect(() => {
+    if (!flowId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let applied = '';
+    const recover = async () => {
+      try {
+        const run = await researchRuns.latest(Number(flowId));
+        if (disposed) return;
+        const current = flowConnectionManager.getConnection(flowId);
+        if (current.kind === 'backtest' && ['connecting', 'connected'].includes(current.state)) return;
+        const waitingForStart = ['connecting', 'connected'].includes(current.state) && !current.runId;
+        if (run && !waitingForStart && (!current.runId || run.id >= current.runId)) {
+          const active = isRunActive(run.status);
+          const state: FlowConnectionState = run.status === 'COMPLETE' ? 'completed'
+            : run.status === 'CANCEL_REQUESTED' ? 'cancelling'
+            : run.status === 'CANCELLED' ? 'cancelled'
+            : run.status === 'TIMED_OUT' ? 'timed_out'
+            : run.status === 'ERROR' ? 'error' : active ? 'connected' : 'idle';
+          flowConnectionManager.setConnection(flowId, { state, runId: run.id, run, error: run.error_message || undefined });
+          const signature = `${run.id}:${run.status}`;
+          if (!active && applied !== signature) {
+            applied = signature;
+            const context = contextRef.current;
+            context.resetNodeStatuses(flowId);
+            if (run.results) context.setOutputNodeData(flowId, run.results as any);
+          }
+        }
+      } catch (error) {
+        // Keep the last known execution state. Losing API connectivity is not completion.
+        if (!disposed) flowConnectionManager.setConnection(flowId, { error: error instanceof Error ? error.message : 'Cannot recover run' });
+      } finally {
+        if (!disposed) timer = setTimeout(recover, 2500);
+      }
+    };
+    void recover();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [flowId]);
 
   // Force re-render when connections change
   useEffect(() => {
@@ -98,7 +145,7 @@ export function useFlowConnection(flowId: string | null) {
   // Get current connection state
   const connection = flowId ? flowConnectionManager.getConnection(flowId) : null;
   const isConnecting = connection?.state === 'connecting';
-  const isConnected = connection?.state === 'connected';
+  const isConnected = connection?.state === 'connected' || connection?.state === 'cancelling';
   const isError = connection?.state === 'error';
   const isCompleted = connection?.state === 'completed';
   
@@ -122,11 +169,16 @@ export function useFlowConnection(flowId: string | null) {
     flowConnectionManager.setConnection(flowId, {
       state: 'connecting',
       startTime: Date.now(),
+      runId: null,
+      run: null,
+      error: undefined,
+      kind: 'single',
+      stopRequested: false,
     });
 
     try {
       // Start the API call
-      const abortController = api.runHedgeFund(params, nodeContext, flowId);
+      const abortController = api.runHedgeFund({ ...params, flow_id: Number(flowId) }, nodeContext, flowId);
 
       // Update connection with abort controller
       flowConnectionManager.setConnection(flowId, {
@@ -158,6 +210,9 @@ export function useFlowConnection(flowId: string | null) {
     flowConnectionManager.setConnection(flowId, {
       state: 'connecting',
       startTime: Date.now(),
+      kind: 'backtest',
+      runId: null,
+      run: null,
     });
 
     try {
@@ -184,18 +239,29 @@ export function useFlowConnection(flowId: string | null) {
   }, [flowId, canRun, nodeContext]);
 
   // Stop a flow connection
-  const stopFlow = useCallback(() => {
+  const stopFlow = useCallback(async () => {
     if (!flowId) return;
-
-    console.log(`[stopFlow] Stopping flow ${flowId}`);
     const connection = flowConnectionManager.getConnection(flowId);
-    console.log(`[stopFlow] Current connection state:`, connection);
+    if (connection.kind !== 'backtest' && connection.runId) {
+      try {
+        const run = await researchRuns.cancel(Number(flowId), connection.runId);
+        flowConnectionManager.setConnection(flowId, {
+          state: isRunActive(run.status) ? 'cancelling' : run.status === 'COMPLETE' ? 'completed' : 'cancelled',
+          run,
+        });
+      } catch (error) {
+        flowConnectionManager.setConnection(flowId, { error: error instanceof Error ? error.message : 'Cancellation failed' });
+      }
+      return;
+    }
+    // Before the start event arrives a saved run may already exist. Recover its ID.
+    if (connection.kind === 'single' && ['connecting', 'connected'].includes(connection.state)) {
+      flowConnectionManager.setConnection(flowId, { stopRequested: true });
+      return;
+    }
     
     if (connection.abortController) {
-      console.log(`[stopFlow] Calling abort controller for flow ${flowId}`);
       connection.abortController();
-    } else {
-      console.log(`[stopFlow] No abort controller found for flow ${flowId}`);
     }
 
     // Reset only node statuses when stopping, preserving all data (backtest results, messages, etc.)
@@ -207,7 +273,6 @@ export function useFlowConnection(flowId: string | null) {
       abortController: null,
     });
     
-    console.log(`[stopFlow] Flow ${flowId} stopped and reset to idle`);
   }, [flowId, nodeContext]);
 
   // Recover from stale states (called when loading a flow)
@@ -215,6 +280,7 @@ export function useFlowConnection(flowId: string | null) {
     if (!flowId) return;
 
     const connection = flowConnectionManager.getConnection(flowId);
+    if (connection.runId) return;
     
     // If we think we're connected but have no processing nodes, we're probably stale
     if ((connection.state === 'connected' || connection.state === 'connecting') && !isProcessing) {

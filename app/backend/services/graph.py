@@ -10,6 +10,7 @@ from src.agents.risk_manager import risk_management_agent
 from src.main import start
 from src.utils.analysts import ANALYST_CONFIG
 from src.graph.state import AgentState
+from src.run_context import RunExecutionContext, use_run_context
 
 
 def extract_base_agent_key(unique_id: str) -> str:
@@ -33,7 +34,7 @@ def extract_base_agent_key(unique_id: str) -> str:
 
 
 # Helper function to create the agent graph
-def create_graph(graph_nodes: list, graph_edges: list) -> StateGraph:
+def create_graph(graph_nodes: list, graph_edges: list, run_context: RunExecutionContext | None = None) -> StateGraph:
     """Create the workflow based on the React Flow graph structure."""
     graph = StateGraph(AgentState)
     graph.add_node("start_node", start)
@@ -62,13 +63,13 @@ def create_graph(graph_nodes: list, graph_edges: list) -> StateGraph:
             continue
             
         node_name, node_func = analyst_nodes[base_agent_key]
-        agent_function = create_agent_function(node_func, unique_agent_id)
+        agent_function = create_agent_function(node_func, unique_agent_id, run_context=run_context)
         graph.add_node(unique_agent_id, agent_function)
     
     # Add portfolio manager nodes and their corresponding risk managers
     risk_manager_nodes = {}  # Map portfolio manager ID to risk manager ID
     for portfolio_manager_id in portfolio_manager_nodes:
-        portfolio_manager_function = create_agent_function(portfolio_management_agent, portfolio_manager_id)
+        portfolio_manager_function = create_agent_function(portfolio_management_agent, portfolio_manager_id, run_context=run_context)
         graph.add_node(portfolio_manager_id, portfolio_manager_function)
         
         # Create unique risk manager for this portfolio manager
@@ -77,7 +78,7 @@ def create_graph(graph_nodes: list, graph_edges: list) -> StateGraph:
         risk_manager_nodes[portfolio_manager_id] = risk_manager_id
         
         # Add the risk manager node
-        risk_manager_function = create_agent_function(risk_management_agent, risk_manager_id)
+        risk_manager_function = create_agent_function(risk_management_agent, risk_manager_id, run_context=run_context)
         graph.add_node(risk_manager_id, risk_manager_function)
 
     # Build connections based on React Flow graph structure
@@ -129,13 +130,23 @@ def create_graph(graph_nodes: list, graph_edges: list) -> StateGraph:
     return graph
 
 
-async def run_graph_async(graph, portfolio, tickers, start_date, end_date, model_name, model_provider, request=None):
+async def run_graph_async(graph, portfolio, tickers, start_date, end_date, model_name, model_provider, request=None, run_context=None):
     """Async wrapper for run_graph to work with asyncio."""
     # Use run_in_executor to run the synchronous function in a separate thread
     # so it doesn't block the event loop
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_graph(graph, portfolio, tickers, start_date, end_date, model_name, model_provider, request))  # Use default executor
-    return result
+    worker = loop.run_in_executor(None, lambda: run_graph(graph, portfolio, tickers, start_date, end_date, model_name, model_provider, request, run_context))  # Use default executor
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling an asyncio Future does not stop its running executor thread.
+        # Keep the shared research/backtest reservation until that thread really
+        # exits, then preserve the caller's cancellation semantics.
+        try:
+            await asyncio.shield(worker)
+        except Exception:
+            pass
+        raise
 
 
 def run_graph(
@@ -147,14 +158,14 @@ def run_graph(
     model_name: str,
     model_provider: str,
     request=None,
+    run_context: RunExecutionContext | None = None,
 ) -> dict:
     """
     Run the graph with the given portfolio, tickers,
     start date, end date, show reasoning, model name,
     and model provider.
     """
-    return graph.invoke(
-        {
+    invocation = {
             "messages": [
                 HumanMessage(
                     content="Make trading decisions based on the provided data.",
@@ -172,9 +183,15 @@ def run_graph(
                 "model_name": model_name,
                 "model_provider": model_provider,
                 "request": request,  # Pass the request for agent-specific model access
+                "run_context": run_context,
+                "strict_execution": run_context is not None,
             },
-        },
-    )
+        }
+    if run_context is None:
+        return graph.invoke(invocation)
+    with use_run_context(run_context):
+        run_context.check_active()
+        return graph.invoke(invocation)
 
 
 def parse_hedge_fund_response(response):

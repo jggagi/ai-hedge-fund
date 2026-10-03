@@ -229,3 +229,10 @@ If ports 8000 or 5173 are in use:
 ### Getting Help
 - Check the [GitHub Issues](https://github.com/virattt/ai-hedge-fund/issues)
 - Follow updates on [Twitter](https://x.com/virattt) 
+# Home Lab M2: saved public filing research
+
+The welcome screen offers **Create public filing research**. Choose one supported company (AAPL, MSFT, NVDA), a disclosure cutoff, and an explicitly selected downloaded Ollama generation model. The preset fetches SEC companyfacts and extracts the latest available annual filing as of that cutoff. It keeps business fundamentals and disclosure-risk interpretations separate from the filing observations.
+
+Every one-time run has a durable FlowRun. Reloading the browser restores its state and report without inference. **Stop research** requests cooperative cancellation; the record remains pending until the worker has stopped. Model failure, invalid output, deadlines, and backend restarts produce explicit terminal records rather than substitute reports. **Export saved run** includes the request, observations and exact source paths, source hashes, model digest when available, prompt/schema hashes, interpretations, and gaps. SEC reports have no market-price or valuation series and do not propose trades.
+
+Run acceptance against a separate database using `HEDGE_FUND_DATABASE_PATH`, and include the local frontend origin in `HEDGE_FUND_CORS_ORIGINS`. The original workflow editor, financial-data source, and backtesting remain available. Only one research or backtest execution is allowed per backend process, so progress and source provenance cannot mix.

@@ -500,20 +500,29 @@ class OllamaService:
         ]
     
     def _format_models_for_api(self, downloaded_models: List[str]) -> List[Dict[str, str]]:
-        """Format downloaded models for API response."""
+        """Expose downloaded generation models, retaining curated display names."""
         # Import OLLAMA_MODELS here to avoid circular imports
         from src.llm.models import OLLAMA_MODELS
-        
+
+        recommended = {model.model_name: model for model in OLLAMA_MODELS}
         api_models = []
-        for ollama_model in OLLAMA_MODELS:
-            if ollama_model.model_name in downloaded_models:
-                api_models.append({
-                    "display_name": ollama_model.display_name,
-                    "model_name": ollama_model.model_name,
-                    "provider": "Ollama"
-                })
-        
+        seen = set()
+        embedding_markers = ("embed", "minilm")
+        for model_name in downloaded_models:
+            if not isinstance(model_name, str) or not model_name.strip():
+                continue
+            model_name = model_name.strip()
+            lowered_name = model_name.lower()
+            if model_name in seen or any(marker in lowered_name for marker in embedding_markers):
+                continue
+            seen.add(model_name)
+            known_model = recommended.get(model_name)
+            api_models.append({
+                "display_name": known_model.display_name if known_model else model_name,
+                "model_name": model_name,
+                "provider": "Ollama",
+            })
         return api_models
 
 # Global service instance
-ollama_service = OllamaService() 
+ollama_service = OllamaService()

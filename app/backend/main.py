@@ -5,9 +5,10 @@ import asyncio
 import os
 
 from app.backend.routes import api_router
-from app.backend.database.connection import engine
+from app.backend.database.connection import engine, SessionLocal
 from app.backend.database.models import Base
 from app.backend.services.ollama_service import ollama_service
+from app.backend.repositories.flow_run_repository import FlowRunRepository
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,14 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def startup_event():
     """Startup event to check Ollama availability."""
+    db = SessionLocal()
+    try:
+        interrupted = FlowRunRepository(db).mark_interrupted_runs()
+        if interrupted:
+            logger.warning("Marked %s unfinished flow runs as interrupted after backend restart", interrupted)
+    finally:
+        db.close()
+
     try:
         logger.info("Checking Ollama availability...")
         status = await ollama_service.check_ollama_status()

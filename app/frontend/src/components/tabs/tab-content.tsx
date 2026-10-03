@@ -3,6 +3,9 @@ import { cn } from '@/lib/utils';
 import { TabService } from '@/services/tab-service';
 import { FileText, FolderOpen } from 'lucide-react';
 import { useEffect } from 'react';
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { flowService } from '@/services/flow-service';
 
 interface TabContentProps {
   className?: string;
@@ -10,6 +13,16 @@ interface TabContentProps {
 
 export function TabContent({ className }: TabContentProps) {
   const { tabs, activeTabId, openTab } = useTabsContext();
+  const [researchError, setResearchError] = useState('');
+  const [creating, setCreating] = useState(false);
+  const createResearch = async () => {
+    setCreating(true); setResearchError('');
+    try {
+      const flow = await flowService.createFlow({ name: 'Public filing research', nodes: [], edges: [], data: { researchPreset: 'sec_filings' } });
+      openTab({ id: `flow-${flow.id}`, ...TabService.createFlowTab(flow) });
+    } catch (e) { setResearchError(e instanceof Error ? e.message : 'Cannot create research'); }
+    finally { setCreating(false); }
+  };
 
   const activeTab = tabs.find(tab => tab.id === activeTabId);
 
@@ -45,7 +58,7 @@ export function TabContent({ className }: TabContentProps) {
         "h-full w-full flex items-center justify-center bg-background text-muted-foreground",
         className
       )}>
-        <div className="text-center space-y-4">
+        <div className="text-center space-y-4 p-4">
           <FolderOpen size={48} className="mx-auto text-muted-foreground/50" />
           <div>
             <div className="text-xl font-medium mb-2">Welcome to the AI Hedge Fund</div>
@@ -53,6 +66,8 @@ export function TabContent({ className }: TabContentProps) {
               Create a flow from the left sidebar (⌘B) to open it in a tab, or open settings (⌘,) to configure your preferences.
             </div>
           </div>
+          <Button disabled={creating} onClick={() => void createResearch()}>Create public filing research</Button>
+          {researchError && <p role="alert" className="text-sm text-destructive">{researchError}</p>}
           <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground/70">
             <FileText size={14} />
             <span>Flows now open in tabs</span>
@@ -81,4 +96,4 @@ export function TabContent({ className }: TabContentProps) {
       {activeTab.content}
     </div>
   );
-} 
+}
