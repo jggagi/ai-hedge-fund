@@ -18,7 +18,7 @@ import { TopBar } from './layout/top-bar';
 // Create a LayoutContent component to access the FlowContext, TabsContext, and LayoutContext
 function LayoutContent() {
   const { reactFlowInstance } = useFlowContext();
-  const { openTab } = useTabsContext();
+  const { openTab, tabs, activeTabId } = useTabsContext();
   const { isBottomCollapsed, expandBottomPanel, collapseBottomPanel, toggleBottomPanel } = useLayoutContext();
   
   // Initialize sidebar states from storage service
@@ -34,6 +34,27 @@ function LayoutContent() {
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(280);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(280);
   const [bottomPanelHeight, setBottomPanelHeight] = useState(300);
+  const publicResearch = tabs.find(tab => tab.id === activeTabId)?.flow?.data?.researchPreset === 'sec_filings';
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 767px)');
+    const adapt = () => {
+      if (media.matches) {
+        setIsLeftCollapsed(true);
+        setIsRightCollapsed(true);
+      }
+    };
+    adapt();
+    media.addEventListener('change', adapt);
+    return () => media.removeEventListener('change', adapt);
+  }, []);
+
+  useEffect(() => {
+    if (publicResearch) {
+      setIsRightCollapsed(true);
+      collapseBottomPanel();
+    }
+  }, [publicResearch]);
 
   const handleSettingsClick = () => {
     const tabData = TabService.createSettingsTab();

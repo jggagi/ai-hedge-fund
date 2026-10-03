@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { flowService } from '@/services/flow-service';
 import { Flow as FlowType } from '@/types/flow';
 import { useEffect } from 'react';
+import { PublicResearch } from './public-research';
 
 // Import the flow connection manager to check if flow is actively running
 
@@ -76,7 +77,7 @@ export function FlowTabContent({ flow, className }: FlowTabContentProps) {
 
   return (
     <div className={cn("h-full w-full", className)}>
-      <Flow />
+      {flow.data?.researchPreset === 'sec_filings' ? <PublicResearch flow={flow} /> : <Flow />}
     </div>
   );
-} 
+}

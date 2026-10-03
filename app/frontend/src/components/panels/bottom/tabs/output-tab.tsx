@@ -5,6 +5,8 @@ import { useEffect, useState } from 'react';
 import { BacktestOutput } from './backtest-output';
 import { sortAgents } from './output-tab-utils';
 import { RegularOutput } from './regular-output';
+import { ResearchHistory } from './research-history';
+import { ResearchRun } from '@/services/research-runs';
 
 interface OutputTabProps {
   className?: string;
@@ -14,6 +16,7 @@ export function OutputTab({ className }: OutputTabProps) {
   const { currentFlowId } = useFlowContext();
   const { getAgentNodeDataForFlow, getOutputNodeDataForFlow } = useNodeContext();
   const [, setUpdateTrigger] = useState(0);
+  const [savedRun, setSavedRun] = useState<ResearchRun | null>(null);
 
   // Refresh the view periodically while agent data is updated outside React state.
   useEffect(() => {
@@ -22,7 +25,7 @@ export function OutputTab({ className }: OutputTabProps) {
   }, []);
   // Get current flow data
   const agentData = getAgentNodeDataForFlow(currentFlowId?.toString() || null);
-  const outputData = getOutputNodeDataForFlow(currentFlowId?.toString() || null);
+  const outputData = savedRun ? savedRun.results : getOutputNodeDataForFlow(currentFlowId?.toString() || null);
   
   // Detect if this is a backtest run
   const isBacktestRun = agentData && agentData['backtest'];
@@ -32,6 +35,7 @@ export function OutputTab({ className }: OutputTabProps) {
   
   return (
     <div className={cn("h-full overflow-y-auto font-mono text-sm", className)}>
+      {currentFlowId && <ResearchHistory flowId={currentFlowId} onSelect={setSavedRun} />}
       {/* Render backtest output if this is a backtest run */}
       {isBacktestRun && (
         <BacktestOutput agentData={agentData} outputData={outputData} />

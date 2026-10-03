@@ -1,10 +1,29 @@
 """Helper functions for LLM"""
 
 import json
+import os
 from pydantic import BaseModel
 from src.llm.models import get_model, get_model_info
+
+
+def _lookup_ollama_model_digest(model_name: str) -> str | None:
+    """Best-effort local /api/tags lookup; returns no digest on any failure."""
+    try:
+        from ollama import Client
+
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
+        base_url = os.getenv("OLLAMA_BASE_URL", f"http://{ollama_host}:11434")
+        response = Client(host=base_url, timeout=1.0).list()
+        for model in getattr(response, "models", []):
+            installed_name = getattr(model, "model", None) or getattr(model, "name", None)
+            if installed_name == model_name:
+                return getattr(model, "digest", None)
+    except Exception:
+        return None
+    return None
 from src.utils.progress import progress
 from src.graph.state import AgentState
+from src.run_context import RunStopped, get_active_run_context
 
 
 def call_llm(
@@ -45,11 +64,49 @@ def call_llm(
         if request and hasattr(request, 'api_keys'):
             api_keys = request.api_keys
 
+    metadata = state.get("metadata", {}) if state else {}
+    strict_execution = bool(metadata.get("strict_execution"))
+    run_context = metadata.get("run_context") or (get_active_run_context() if strict_execution else None)
+    local_ollama = str(getattr(model_provider, "value", model_provider)).lower() == "ollama"
+    model_timeout = min(30.0, run_context.remaining_seconds()) if run_context is not None else None
+    run_options = {}
+    if strict_execution and local_ollama:
+        run_options = {
+            "temperature": 0,
+            "reasoning": False,
+            "num_predict": 768,
+            "timeout_seconds": model_timeout,
+            "structured_output": "json_schema",
+        }
+    if run_context is not None:
+        run_context.check_active()
+        model_digest = (
+            run_context.get_model_digest(model_name, _lookup_ollama_model_digest)
+            if strict_execution and local_ollama
+            else None
+        )
+        run_context.capture_model(
+            model_name,
+            model_provider,
+            prompt,
+            schema=pydantic_model.model_json_schema(),
+            temperature=0 if strict_execution and local_ollama else None,
+            options=run_options,
+            model_digest=model_digest,
+        )
     model_info = get_model_info(model_name, model_provider)
-    llm = get_model(model_name, model_provider, api_keys)
+    llm = get_model(
+        model_name,
+        model_provider,
+        api_keys,
+        timeout_seconds=model_timeout,
+        strict_run=strict_execution,
+    )
 
     # For non-JSON support models, we can use structured output
-    if not (model_info and not model_info.has_json_mode()):
+    if strict_execution and local_ollama:
+        llm = llm.with_structured_output(pydantic_model, method="json_schema")
+    elif not (model_info and not model_info.has_json_mode()):
         llm = llm.with_structured_output(
             pydantic_model,
             method="json_mode",
@@ -58,23 +115,36 @@ def call_llm(
     # Call the LLM with retries
     for attempt in range(max_retries):
         try:
+            if run_context is not None:
+                run_context.check_active()
             # Call the LLM
             result = llm.invoke(prompt)
+            if result is None:
+                raise ValueError("LLM returned an empty response")
 
             # For non-JSON support models, we need to extract and parse the JSON manually
             if model_info and not model_info.has_json_mode():
                 parsed_result = extract_json_from_response(result.content)
                 if parsed_result:
                     return pydantic_model(**parsed_result)
+                raise ValueError("LLM returned invalid or empty structured output")
             else:
+                if strict_execution and not isinstance(result, pydantic_model):
+                    if isinstance(result, dict):
+                        return pydantic_model.model_validate(result)
+                    raise ValueError("LLM returned an unexpected structured output type")
                 return result
 
+        except RunStopped:
+            raise
         except Exception as e:
             if agent_name:
                 progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
 
             if attempt == max_retries - 1:
                 print(f"Error in LLM call after {max_retries} attempts: {e}")
+                if strict_execution:
+                    raise RuntimeError(f"LLM analysis failed for {agent_name or 'agent'}: {e}") from e
                 # Use default_factory if provided, otherwise create a basic default
                 if default_factory:
                     return default_factory()

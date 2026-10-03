@@ -59,6 +59,7 @@ export function PortfolioStartNode({
   const [startDate, setStartDate] = useNodeState(id, 'startDate', threeMonthsAgo.toISOString().split('T')[0]);
   const [endDate, setEndDate] = useNodeState(id, 'endDate', today.toISOString().split('T')[0]);
   const [open, setOpen] = useState(false);
+  const [runError, setRunError] = useState('');
   
   const { currentFlowId } = useFlowContext();
   const nodeContext = useNodeContext();
@@ -138,11 +139,9 @@ export function PortfolioStartNode({
   };
 
   const handlePlay = () => {
-    // Expand bottom panel and set to output tab if backtest
-    if (runMode === 'backtest') {
-      expandBottomPanel();
-      setBottomPanelTab('output');
-    }
+    setRunError('');
+    expandBottomPanel();
+    setBottomPanelTab('output');
     
     // Get the current flow's nodes and edges
     const allNodes = getNodes();
@@ -194,6 +193,17 @@ export function PortfolioStartNode({
         });
       }
     }
+    if (runMode === 'single') {
+      const analysts = agentNodes.filter(node => node.type === 'agent-node' || node.type === 'portfolio-manager-node');
+      if (!analysts.length || analysts.some(node => !allAgentModels[node.id])) {
+        setRunError('Select a model for every analyst and portfolio manager before running.');
+        return;
+      }
+      if (!startDate || !endDate || startDate > endDate) {
+        setRunError('Choose a valid date range.');
+        return;
+      }
+    }
     
     // Convert positions to the expected format for backend use
     const portfolioPositions = positions
@@ -243,11 +253,11 @@ export function PortfolioStartNode({
         })),
         graph_edges: validEdges,
         agent_models: agentModels,
-        // No global model - each agent uses its own model or system default
-        model_name: undefined,
-        model_provider: undefined,
-        start_date: threeMonthsAgo.toISOString().split('T')[0],
-        end_date: today.toISOString().split('T')[0],
+        model_name: agentModels[0]?.model_name,
+        model_provider: agentModels[0]?.model_provider,
+        timeout_seconds: 300,
+        start_date: startDate,
+        end_date: endDate,
         initial_cash: parseFloat(initialCash) || 100000,
         // Pass portfolio positions to backend
         portfolio_positions: portfolioPositions,
@@ -404,7 +414,8 @@ export function PortfolioStartNode({
                       </Command>
                     </PopoverContent>
                   </Popover>
-                  <Button 
+                  <Button
+                    aria-label={showAsProcessing ? 'Stop research' : 'Run research'}
                     size="icon" 
                     variant="secondary"
                     className="flex-shrink-0 transition-all duration-200 hover:bg-primary hover:text-primary-foreground active:scale-95"
@@ -420,13 +431,15 @@ export function PortfolioStartNode({
                   </Button>
                 </div>
               </div>
-              {runMode === 'backtest' && (
+              {runError && <p role="alert" className="text-xs text-destructive">{runError}</p>}
+              {(
                 <div className="flex flex-col gap-4">
                   <div className="flex flex-col gap-2">
                     <div className="text-subtitle text-primary flex items-center gap-1">
                       Start Date
                     </div>
                     <Input
+                      aria-label="Research start date"
                       type="date"
                       value={startDate}
                       onChange={handleStartDateChange}
@@ -437,6 +450,7 @@ export function PortfolioStartNode({
                       End Date
                     </div>
                     <Input
+                      aria-label="Research end date"
                       type="date"
                       value={endDate}
                       onChange={handleEndDateChange}

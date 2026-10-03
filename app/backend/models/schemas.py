@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from src.llm.models import ModelProvider
 from enum import Enum
 from app.backend.services.graph import extract_base_agent_key
@@ -9,8 +9,11 @@ from app.backend.services.graph import extract_base_agent_key
 class FlowRunStatus(str, Enum):
     IDLE = "IDLE"
     IN_PROGRESS = "IN_PROGRESS"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
     COMPLETE = "COMPLETE"
     ERROR = "ERROR"
+    CANCELLED = "CANCELLED"
+    TIMED_OUT = "TIMED_OUT"
 
 
 class AgentModelConfig(BaseModel):
@@ -132,6 +135,9 @@ class HedgeFundRequest(BaseHedgeFundRequest):
     end_date: Optional[str] = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
     start_date: Optional[str] = None
     initial_cash: float = 100000.0
+    flow_id: Optional[int] = Field(default=None, gt=0)
+    timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    data_source: Literal["financial_datasets", "sec_filings"] = "financial_datasets"
 
     def get_start_date(self) -> str:
         """Calculate start date if not provided"""

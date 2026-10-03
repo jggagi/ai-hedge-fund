@@ -25,6 +25,7 @@ export interface AgentNodeData {
 
 // Data structure for the output node data (from complete event)
 export interface OutputNodeData {
+  research_report?: Record<string, any>;
   decisions: Record<string, any>;
   analyst_signals: Record<string, any>;
   // Backtest-specific fields
@@ -435,4 +436,4 @@ export function useNodeContext() {
   }
   
   return context;
-} 
+}

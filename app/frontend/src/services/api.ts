@@ -4,6 +4,7 @@ import { LanguageModel } from '@/data/models';
 import { extractBaseAgentKey } from '@/data/node-mappings';
 import { flowConnectionManager } from '@/hooks/use-flow-connection';
 import { API_BASE_URL } from '@/lib/api-config';
+import { researchRuns } from '@/services/research-runs';
 import {
   HedgeFundRequest
 } from '@/services/types';
@@ -113,9 +114,10 @@ export const api = {
       body: JSON.stringify(backendParams),
       signal,
     })
-    .then(response => {
+    .then(async response => {
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`);
       }
             
       // Process the response as a stream of SSE events
@@ -162,6 +164,14 @@ export const api = {
                   // Process based on event type
                   switch (eventType) {
                     case 'start':
+                      if (flowId) {
+                        const current = flowConnectionManager.getConnection(flowId);
+                        flowConnectionManager.setConnection(flowId, { runId: eventData.run_id, state: current.stopRequested ? 'cancelling' : 'connected' });
+                        if (current.stopRequested && eventData.run_id) {
+                          researchRuns.cancel(Number(flowId), eventData.run_id).catch(error =>
+                            flowConnectionManager.setConnection(flowId, { error: error.message }));
+                        }
+                      }
                       // Reset all nodes at the start of a new run
                       nodeContext.resetAllNodes(flowId);
                       break;
@@ -210,15 +220,6 @@ export const api = {
                           abortController: null,
                         });
 
-                        // Optional: Auto-cleanup completed connections after a delay
-                        setTimeout(() => {
-                          const currentConnection = flowConnectionManager.getConnection(flowId);
-                          if (currentConnection.state === 'completed') {
-                            flowConnectionManager.setConnection(flowId, {
-                              state: 'idle',
-                            });
-                          }
-                        }, 30000); // 30 seconds
                       }
                       break;
                     case 'error':
@@ -244,17 +245,7 @@ export const api = {
             }
           }
           
-          // After the stream has finished, check if we are still in a connected state.
-          // This can happen if the backend closes the connection without sending a 'complete' event.
-          if (flowId) {
-            const currentConnection = flowConnectionManager.getConnection(flowId);
-            if (currentConnection.state === 'connected') {
-              flowConnectionManager.setConnection(flowId, {
-                state: 'completed',
-                abortController: null,
-              });
-            }
-          }
+          // EOF does not prove success. The recovery hook consults the saved status.
         } catch (error: any) { // Type assertion for error
           if (error.name !== 'AbortError') {
             console.error('Error reading SSE stream:', error);

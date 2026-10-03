@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
+import asyncio
 
 from app.backend.database import get_db
 from app.backend.repositories.flow_run_repository import FlowRunRepository
@@ -13,6 +14,11 @@ from app.backend.models.schemas import (
     FlowRunStatus,
     ErrorResponse
 )
+from app.backend.services.run_manager import research_run_manager
+from app.backend.database.models import HedgeFundFlowRun
+
+
+_ACTIVE_STATUSES = (FlowRunStatus.IN_PROGRESS.value, FlowRunStatus.CANCEL_REQUESTED.value)
 
 router = APIRouter(prefix="/flows/{flow_id}/runs", tags=["flow-runs"])
 
@@ -195,6 +201,8 @@ async def update_flow_run(
         existing_run = run_repo.get_flow_run_by_id(run_id)
         if not existing_run or existing_run.flow_id != flow_id:
             raise HTTPException(status_code=404, detail="Flow run not found")
+        if existing_run.status in _ACTIVE_STATUSES or research_run_manager.owns_run(run_id):
+            raise HTTPException(status_code=409, detail="An active research run cannot be updated")
         
         flow_run = run_repo.update_flow_run(
             run_id=run_id,
@@ -211,6 +219,56 @@ async def update_flow_run(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update flow run: {str(e)}")
+
+
+@router.post(
+    "/{run_id}/cancel",
+    response_model=FlowRunResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Flow or run not found"},
+        409: {"model": ErrorResponse, "description": "Run has no controllable worker"},
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+    },
+)
+async def cancel_flow_run(flow_id: int, run_id: int, db: Session = Depends(get_db)):
+    """Request cooperative cancellation and return the persisted state."""
+    flow_repo = FlowRepository(db)
+    if not flow_repo.get_flow_by_id(flow_id):
+        raise HTTPException(status_code=404, detail="Flow not found")
+
+    run_repo = FlowRunRepository(db)
+    existing = run_repo.get_flow_run_by_id(run_id)
+    if not existing or existing.flow_id != flow_id:
+        raise HTTPException(status_code=404, detail="Flow run not found")
+
+    if existing.status not in {FlowRunStatus.IN_PROGRESS.value, FlowRunStatus.CANCEL_REQUESTED.value}:
+        return FlowRunResponse.from_orm(existing)
+
+    active = research_run_manager.request_cancel(flow_id, run_id)
+    if active is None:
+        updated = run_repo.update_flow_run(
+            run_id,
+            status=FlowRunStatus.ERROR,
+            error_message="Backend has no active worker for this run; it was marked interrupted.",
+        )
+        return FlowRunResponse.from_orm(updated)
+
+    if active.worker is not None and active.worker.done():
+        try:
+            await asyncio.wait_for(active.done.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        db.expire(existing)
+        refreshed = run_repo.get_flow_run_by_id(run_id)
+        if refreshed and refreshed.status not in {FlowRunStatus.IN_PROGRESS.value, FlowRunStatus.CANCEL_REQUESTED.value}:
+            return FlowRunResponse.from_orm(refreshed)
+
+    updated = run_repo.update_flow_run(
+        run_id,
+        status=FlowRunStatus.CANCEL_REQUESTED,
+        error_message="Cancellation requested; waiting for in-flight work to stop.",
+    )
+    return FlowRunResponse.from_orm(updated)
 
 
 @router.delete(
@@ -235,6 +293,8 @@ async def delete_flow_run(flow_id: int, run_id: int, db: Session = Depends(get_d
         existing_run = run_repo.get_flow_run_by_id(run_id)
         if not existing_run or existing_run.flow_id != flow_id:
             raise HTTPException(status_code=404, detail="Flow run not found")
+        if existing_run.status in _ACTIVE_STATUSES or research_run_manager.owns_run(run_id):
+            raise HTTPException(status_code=409, detail="An active research run cannot be deleted")
         
         success = run_repo.delete_flow_run(run_id)
         if not success:
@@ -266,6 +326,11 @@ async def delete_all_flow_runs(flow_id: int, db: Session = Depends(get_db)):
         
         # Delete all flow runs
         run_repo = FlowRunRepository(db)
+        if research_run_manager.owns_flow(flow_id) or db.query(HedgeFundFlowRun).filter(
+            HedgeFundFlowRun.flow_id == flow_id,
+            HedgeFundFlowRun.status.in_(_ACTIVE_STATUSES),
+        ).first():
+            raise HTTPException(status_code=409, detail="Runs cannot be deleted while a research run is active")
         deleted_count = run_repo.delete_flow_runs_by_flow_id(flow_id)
         
         return {"message": f"Deleted {deleted_count} flow runs successfully"}
@@ -300,4 +365,4 @@ async def get_flow_run_count(flow_id: int, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get flow run count: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to get flow run count: {str(e)}")

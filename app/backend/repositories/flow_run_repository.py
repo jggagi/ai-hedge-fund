@@ -82,7 +82,12 @@ class FlowRunRepository:
             # Update timing based on status
             if status == FlowRunStatus.IN_PROGRESS and not flow_run.started_at:
                 flow_run.started_at = datetime.utcnow()
-            elif status in [FlowRunStatus.COMPLETE, FlowRunStatus.ERROR] and not flow_run.completed_at:
+            elif status in [
+                FlowRunStatus.COMPLETE,
+                FlowRunStatus.ERROR,
+                FlowRunStatus.CANCELLED,
+                FlowRunStatus.TIMED_OUT,
+            ] and not flow_run.completed_at:
                 flow_run.completed_at = datetime.utcnow()
         
         # Update results and error message
@@ -122,6 +127,23 @@ class FlowRunRepository:
             .filter(HedgeFundFlowRun.flow_id == flow_id)
             .count()
         )
+
+    def mark_interrupted_runs(self) -> int:
+        """Fail runs left active by a process restart so they cannot block new work."""
+        active = self.db.query(HedgeFundFlowRun).filter(
+            HedgeFundFlowRun.status.in_([
+                FlowRunStatus.IN_PROGRESS.value,
+                FlowRunStatus.CANCEL_REQUESTED.value,
+            ])
+        ).all()
+        now = datetime.utcnow()
+        for flow_run in active:
+            flow_run.status = FlowRunStatus.ERROR.value
+            flow_run.error_message = "Backend restarted before the run completed; execution was interrupted."
+            flow_run.completed_at = now
+        if active:
+            self.db.commit()
+        return len(active)
     
     def _get_next_run_number(self, flow_id: int) -> int:
         """Get the next run number for a flow"""
@@ -130,4 +152,4 @@ class FlowRunRepository:
             .filter(HedgeFundFlowRun.flow_id == flow_id)
             .scalar()
         )
-        return (max_run_number or 0) + 1 
+        return (max_run_number or 0) + 1

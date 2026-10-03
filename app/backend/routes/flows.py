@@ -11,6 +11,9 @@ from app.backend.models.schemas import (
     FlowSummaryResponse,
     ErrorResponse
 )
+from app.backend.database.models import HedgeFundFlowRun
+from app.backend.models.schemas import FlowRunStatus
+from app.backend.services.run_manager import research_run_manager
 
 router = APIRouter(prefix="/flows", tags=["flows"])
 
@@ -124,6 +127,11 @@ async def update_flow(flow_id: int, request: FlowUpdateRequest, db: Session = De
 async def delete_flow(flow_id: int, db: Session = Depends(get_db)):
     """Delete a flow"""
     try:
+        if research_run_manager.owns_flow(flow_id) or db.query(HedgeFundFlowRun).filter(
+            HedgeFundFlowRun.flow_id == flow_id,
+            HedgeFundFlowRun.status.in_([FlowRunStatus.IN_PROGRESS.value, FlowRunStatus.CANCEL_REQUESTED.value]),
+        ).first():
+            raise HTTPException(status_code=409, detail="A flow with an active research run cannot be deleted")
         repo = FlowRepository(db)
         success = repo.delete_flow(flow_id)
         if not success:
@@ -171,4 +179,4 @@ async def search_flows(name: str, db: Session = Depends(get_db)):
         flows = repo.get_flows_by_name(name)
         return [FlowSummaryResponse.from_orm(flow) for flow in flows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to search flows: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to search flows: {str(e)}")
