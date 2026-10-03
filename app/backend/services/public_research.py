@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import gzip
 import hashlib
+from io import BytesIO
 import json
 import re
+import time
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -19,7 +22,10 @@ from src.utils.llm import call_llm
 
 
 SEC_USER_AGENT = "HomeLabResearch/1.0 personal research"
-SEC_TIMEOUT_SECONDS = 12.0
+SEC_IDLE_TIMEOUT_SECONDS = 30.0
+SEC_TOTAL_DEADLINE_SECONDS = 120.0
+SEC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+SEC_READ_CHUNK_BYTES = 64 * 1024
 NUMERIC_LITERAL = re.compile(
     r"(?<![\w.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?"
     r"(?=(?:\s*(?:thousand|million|billion|mn|bn|k|m|b)s?\b)|(?:[^\w]|$))",
@@ -80,9 +86,76 @@ class AnalystOutput(BaseModel):
     gaps: list[str] = Field(default_factory=list)
 
 
+class _FetchDeadlineExceeded(TimeoutError):
+    pass
+
+
 def _check_active(context: Any) -> None:
     if context is not None:
         context.check_active()
+
+
+def _check_fetch_deadline(context: Any, deadline: float) -> None:
+    _check_active(context)
+    if time.monotonic() >= deadline:
+        raise _FetchDeadlineExceeded("SEC company facts fetch exceeded its whole-request deadline")
+
+
+def _read_response(
+    response: Any,
+    context: Any,
+    deadline: float,
+    max_bytes: int = SEC_MAX_RESPONSE_BYTES,
+) -> bytes:
+    """Read a bounded SEC body, checking cancellation and the whole-fetch deadline per chunk."""
+    read_chunk = getattr(response, "read1", None)
+    if not callable(read_chunk):
+        # Small test adapters and non-HTTP response doubles may only expose
+        # read(). urllib HTTPResponse uses read1(), so production streams.
+        _check_fetch_deadline(context, deadline)
+        raw = response.read()
+        _check_fetch_deadline(context, deadline)
+        if len(raw) > max_bytes:
+            raise ValueError("SEC company facts response exceeds the configured size limit")
+        return raw
+
+    chunks: list[bytes] = []
+    total_bytes = 0
+    while True:
+        _check_fetch_deadline(context, deadline)
+        chunk = read_chunk(SEC_READ_CHUNK_BYTES)
+        _check_fetch_deadline(context, deadline)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise ValueError("SEC company facts response exceeds the configured size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode_response_body(
+    raw: bytes,
+    content_encoding: str | None,
+    context: Any,
+    deadline: float,
+    max_bytes: int | None = None,
+) -> bytes:
+    """Decode supported SEC transfer encoding without unbounded expansion."""
+    _check_fetch_deadline(context, deadline)
+    cap = SEC_MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
+    encoding = (content_encoding or "identity").strip().lower()
+    if encoding in {"", "identity"}:
+        decoded = raw
+    elif encoding == "gzip":
+        with gzip.GzipFile(fileobj=BytesIO(raw), mode="rb") as compressed:
+            decoded = compressed.read(cap + 1)
+    else:
+        raise ValueError(f"Unsupported SEC content encoding: {encoding}")
+    _check_fetch_deadline(context, deadline)
+    if len(decoded) > cap:
+        raise ValueError("SEC company facts response exceeds the configured decompressed size limit")
+    return decoded
 
 
 def _as_of_date(request: Any) -> date:
@@ -389,14 +462,25 @@ def _assert_local_models(request: Any) -> dict[str, dict[str, str]]:
 
 def _fetch_company_facts(cik: str, context: Any) -> tuple[dict[str, Any], str]:
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-    timeout = SEC_TIMEOUT_SECONDS
+    started_at = time.monotonic()
+    budget = SEC_TOTAL_DEADLINE_SECONDS
     if context is not None:
-        timeout = min(timeout, context.remaining_seconds())
-    req = Request(url, headers={"User-Agent": SEC_USER_AGENT, "Accept": "application/json"})
+        budget = min(budget, context.remaining_seconds())
+    deadline = started_at + budget
+    idle_timeout = min(SEC_IDLE_TIMEOUT_SECONDS, budget)
+    req = Request(url, headers={
+        "User-Agent": SEC_USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+    })
     try:
-        with urlopen(req, timeout=timeout) as response:
-            raw = response.read()
+        with urlopen(req, timeout=idle_timeout) as response:
+            compressed_or_raw = _read_response(response, context, deadline)
+            headers = getattr(response, "headers", {})
+            content_encoding = headers.get("Content-Encoding") if hasattr(headers, "get") else None
+            raw = _decode_response_body(compressed_or_raw, content_encoding, context, deadline)
             payload = json.loads(raw.decode("utf-8"))
+            _check_fetch_deadline(context, deadline)
             if context is not None:
                 context.capture_source("GET", url, status_code=getattr(response, "status", 200), body=payload)
             return payload, url
@@ -406,6 +490,10 @@ def _fetch_company_facts(cik: str, context: Any) -> tuple[dict[str, Any], str]:
         if context is not None:
             _check_active(context)
             context.capture_source("GET", url, error=f"{type(exc).__name__}: SEC company facts request failed")
+        if isinstance(exc, _FetchDeadlineExceeded):
+            raise RuntimeError(str(exc)) from exc
+        if isinstance(exc, ValueError) and "size limit" in str(exc):
+            raise RuntimeError(str(exc)) from exc
         raise RuntimeError("SEC company facts could not be retrieved") from exc
 
 

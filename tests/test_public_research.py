@@ -1,5 +1,8 @@
 import json
 import hashlib
+import io
+import gzip
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -375,6 +378,89 @@ def test_run_stop_from_sec_fetch_is_preserved():
         with pytest.raises(research.RunStopped, match="cancelled"):
             research._fetch_company_facts("0000320193", context)
     context.capture_source.assert_not_called()
+
+
+def test_sec_response_is_read_across_bounded_chunks():
+    payload = b"x" * (research.SEC_READ_CHUNK_BYTES * 2 + 19)
+    response = io.BytesIO(payload)
+    response.read1 = Mock(wraps=response.read1)
+
+    actual = research._read_response(response, None, time.monotonic() + 10)
+
+    assert actual == payload
+    assert response.read1.call_count >= 3
+
+
+def test_sec_stream_propagates_cancellation_between_chunks():
+    response = io.BytesIO(b"x" * (research.SEC_READ_CHUNK_BYTES * 2))
+    checks = 0
+
+    def check_active():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise research.RunStopped("cancelled between chunks")
+
+    context = SimpleNamespace(check_active=check_active)
+    with pytest.raises(research.RunStopped, match="cancelled between chunks"):
+        research._read_response(response, context, time.monotonic() + 10)
+    assert checks == 2
+
+
+def test_sec_stream_rejects_oversize_body_and_expired_deadline():
+    with pytest.raises(ValueError, match="size limit"):
+        research._read_response(io.BytesIO(b"12345"), None, time.monotonic() + 10, max_bytes=4)
+    with pytest.raises(research._FetchDeadlineExceeded, match="whole-request deadline"):
+        research._read_response(io.BytesIO(b"body"), None, time.monotonic() - 1)
+    clock = iter((100.0, 100.0, 101.0))
+    with patch.object(research.time, "monotonic", side_effect=lambda: next(clock)):
+        with pytest.raises(research._FetchDeadlineExceeded, match="whole-request deadline"):
+            research._read_response(io.BytesIO(b"first chunk then deadline"), None, 100.5)
+
+
+def test_sec_fetch_uses_30_second_idle_timeout():
+    payload = json.dumps(_facts()).encode()
+
+    @contextmanager
+    def fake_response(*_args, **_kwargs):
+        yield SimpleNamespace(read=lambda: payload, status=200)
+
+    with patch.object(research, "urlopen", side_effect=fake_response) as fetch:
+        research._fetch_company_facts("0000320193", None)
+
+    assert fetch.call_args.kwargs["timeout"] == 30
+    assert research.SEC_TOTAL_DEADLINE_SECONDS == 120
+
+
+def test_sec_fetch_requests_and_decodes_gzip_response():
+    payload = json.dumps(_facts()).encode()
+    compressed = gzip.compress(payload)
+
+    @contextmanager
+    def fake_response(*_args, **_kwargs):
+        response = io.BytesIO(compressed)
+        response.status = 200
+        response.headers = {"Content-Encoding": "gzip"}
+        yield response
+
+    with patch.object(research, "urlopen", side_effect=fake_response) as fetch:
+        decoded, url = research._fetch_company_facts("0000320193", None)
+
+    assert decoded["facts"]["us-gaap"]
+    assert url.endswith("CIK0000320193.json")
+    assert fetch.call_args.args[0].get_header("Accept-encoding") == "gzip"
+
+
+def test_sec_gzip_decompression_is_capped():
+    compressed = gzip.compress(b"x" * 1000)
+    with pytest.raises(ValueError, match="decompressed size limit"):
+        research._decode_response_body(
+            compressed,
+            "gzip",
+            None,
+            time.monotonic() + 10,
+            max_bytes=100,
+        )
 
 
 @pytest.mark.parametrize("tickers", [["AAPL", "MSFT"], ["TSLA"], []])
