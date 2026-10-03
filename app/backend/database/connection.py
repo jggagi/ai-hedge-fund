@@ -6,7 +6,12 @@ from pathlib import Path
 
 # Get the backend directory path
 BACKEND_DIR = Path(__file__).parent.parent
-DATABASE_PATH = BACKEND_DIR / "hedge_fund.db"
+configured_database_path = os.environ.get("HEDGE_FUND_DATABASE_PATH")
+if configured_database_path:
+    DATABASE_PATH = Path(configured_database_path).expanduser().resolve()
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+else:
+    DATABASE_PATH = BACKEND_DIR / "hedge_fund.db"
 
 # Database configuration - use absolute path
 DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
@@ -29,4 +34,4 @@ def get_db():
     try:
         yield db
     finally:
-        db.close() 
+        db.close()
