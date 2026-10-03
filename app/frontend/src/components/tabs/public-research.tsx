@@ -67,7 +67,7 @@ export function PublicResearch({ flow }: { flow: Flow }) {
       <Button onClick={() => void run()} disabled={!canRun || saving || !modelName}>Run filing research</Button>
       {active && <Button variant="outline" onClick={() => void stopFlow()}>Stop research</Button>}
     </div>
-    {(error || runError) && <p role="alert" className="text-sm text-destructive">{error || runError}</p>}
+    {(error || (!savedRun && runError)) && <p role="alert" className="text-sm text-destructive">{error || runError}</p>}
     <ResearchHistory flowId={flow.id} onSelect={setSavedRun} />
     {active && progress.length > 0 && <section aria-label="Research progress" className="text-xs space-y-2">
       {progress.map(([agent, data]) => <p key={agent}>{agent}: {data.message || data.status}</p>)}
